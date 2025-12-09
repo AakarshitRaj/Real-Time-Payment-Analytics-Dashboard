@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: financeops
+
+  backend:
+    build: ./backend
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mongodb
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017/financeops
+      NODE_ENV: development
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_WS_URL: ws://localhost:3001
+
+volumes:
+  mongo_data:

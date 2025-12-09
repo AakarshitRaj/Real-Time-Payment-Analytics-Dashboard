@@ -1,0 +1,12 @@
+# Backend
+node_modules/
+dist/
+
+# Frontend
+node_modules/
+.next/
+out/
+
+# TypeScript
+*.js
+*.js.map
