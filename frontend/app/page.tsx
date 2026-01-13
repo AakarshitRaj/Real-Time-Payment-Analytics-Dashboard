@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
-import { Activity, TrendingUp, DollarSign, CheckCircle, XCircle, Clock, Download, Play, Pause } from 'lucide-react';
+import { Activity, TrendingUp, DollarSign, CheckCircle, XCircle, Clock, Download, Play, Pause, Wifi, WifiOff } from 'lucide-react';
 
 // Types
 interface Payment {
@@ -35,47 +35,6 @@ interface TrendData {
   successRate: number;
 }
 
-class MockWebSocket {
-  private handlers: { [key: string]: Function[] } = {};
-  private interval: NodeJS.Timeout | null = null;
-  
-  addEventListener(event: string, handler: Function) {
-    if (!this.handlers[event]) this.handlers[event] = [];
-    this.handlers[event].push(handler);
-  }
-  
-  removeEventListener(event: string, handler: Function) {
-    if (this.handlers[event]) {
-      this.handlers[event] = this.handlers[event].filter(h => h !== handler);
-    }
-  }
-  
-  start() {
-    this.interval = setInterval(() => {
-      const payment: Payment = {
-        _id: Math.random().toString(36).substr(2, 9),
-        tenantId: 'tenant_1',
-        amount: Math.floor(Math.random() * 5000) + 100,
-        method: ['card', 'bank_transfer', 'crypto', 'paypal'][Math.floor(Math.random() * 4)],
-        status: Math.random() > 0.15 ? 'success' : 'failed',
-        createdAt: new Date().toISOString()
-      };
-      
-      const event: PaymentEvent = {
-        type: payment.status === 'failed' ? 'payment_failed' : 'payment_received',
-        payment,
-        timestamp: new Date().toISOString()
-      };
-      
-      this.handlers['message']?.forEach(h => h({ data: JSON.stringify(event) }));
-    }, 2000);
-  }
-  
-  close() {
-    if (this.interval) clearInterval(this.interval);
-  }
-}
-
 const Dashboard = () => {
   const [events, setEvents] = useState<PaymentEvent[]>([]);
   const [metrics, setMetrics] = useState<PaymentMetrics>({
@@ -88,44 +47,139 @@ const Dashboard = () => {
   });
   const [trendPeriod, setTrendPeriod] = useState<'day' | 'week' | 'month'>('day');
   const [isPaused, setIsPaused] = useState(false);
-  const [ws, setWs] = useState<MockWebSocket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [socket, setSocket] = useState<any>(null);
 
-  // Initialize WebSocket
+  // Initialize Socket.IO connection
   useEffect(() => {
-    const mockWs = new MockWebSocket();
+    // Load Socket.IO from CDN
+    const script = document.createElement('script');
+    script.src = 'https://cdn.socket.io/4.5.4/socket.io.min.js';
+    script.async = true;
     
-    const handleMessage = (e: MessageEvent) => {
-      const event: PaymentEvent = JSON.parse(e.data);
+    script.onload = () => {
+      const io = (window as any).io;
       
-      if (!isPaused) {
-        setEvents(prev => [event, ...prev].slice(0, 100));
-        
-        setMetrics(prev => {
-          const newTotal = prev.totalVolume + event.payment.amount;
-          const newCount = prev.activePayments + 1;
-          const successCount = event.payment.status === 'success' ? 1 : 0;
-          const totalSuccess = (prev.successRate * prev.activePayments + successCount) / newCount;
-          
-          return {
-            totalVolume: newTotal,
-            successRate: totalSuccess * 100,
-            averageAmount: newTotal / newCount,
-            peakHour: new Date().getHours(),
-            topPaymentMethod: event.payment.method,
-            activePayments: newCount
+      if (!io) {
+        console.error('Socket.IO failed to load');
+        return;
+      }
+      
+      const socketInstance = io('http://localhost:3001', {
+        path: '/ws/payments',
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 5
+      });
+
+      // Connection events
+      socketInstance.on('connect', () => {
+        console.log('Socket connected:', socketInstance.id);
+        setIsConnected(true);
+      });
+
+      socketInstance.on('disconnect', () => {
+        console.log('Socket disconnected');
+        setIsConnected(false);
+      });
+
+      socketInstance.on('connected', (data: any) => {
+        console.log('Server message:', data);
+      });
+
+      socketInstance.on('connect_error', (error: any) => {
+        console.error('Connection error:', error);
+        setIsConnected(false);
+      });
+
+      // this is what your backend emits
+      socketInstance.on('payment_event', (eventData: any) => {
+        console.log('Received payment_event:', eventData);
+        if (!isPaused) {
+          const event: PaymentEvent = {
+            type: eventData.type,
+            payment: eventData.payment,
+            timestamp: typeof eventData.timestamp === 'string' 
+              ? eventData.timestamp 
+              : new Date(eventData.timestamp).toISOString()
           };
-        });
+          handlePaymentEvent(event);
+        }
+      });
+
+      socketInstance.on('error', (error: any) => {
+        console.error('Socket error:', error);
+      });
+
+      setSocket(socketInstance);
+    };
+
+    script.onerror = () => {
+      console.error('Failed to load Socket.IO script');
+    };
+
+    // Check if Socket.IO is already loaded
+    if ((window as any).io) {
+      script.onload(null as any);
+    } else {
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      if (socket) {
+        socket.disconnect();
+      }
+      // Clean up script tag if needed
+      if (script.parentNode) {
+        script.parentNode.removeChild(script);
       }
     };
+  }, []);
+
+  // Handle payment events
+  const handlePaymentEvent = useCallback((event: PaymentEvent) => {
+    setEvents(prev => [event, ...prev].slice(0, 100));
     
-    mockWs.addEventListener('message', handleMessage);
-    mockWs.start();
-    setWs(mockWs);
-    
-    return () => {
-      mockWs.close();
-    };
-  }, [isPaused]);
+    setMetrics(prev => {
+      const newTotal = prev.totalVolume + event.payment.amount;
+      const newCount = prev.activePayments + 1;
+      const successCount = event.payment.status === 'success' ? 1 : 0;
+      const totalSuccess = (prev.successRate * prev.activePayments + successCount) / newCount;
+      
+      return {
+        totalVolume: newTotal,
+        successRate: totalSuccess * 10,
+        averageAmount: newTotal / newCount,
+        peakHour: new Date().getHours(),
+        topPaymentMethod: event.payment.method,
+        activePayments: newCount
+      };
+    });
+  }, []);
+
+  // Pause/Resume functionality
+  useEffect(() => {
+    if (socket && isConnected) {
+      if (isPaused) {
+        socket.off('payment_event');
+        console.log('Payment events paused');
+      } else {
+        socket.on('payment_event', (eventData: any) => {
+          console.log('Received payment_event (via pause/resume):', eventData);
+          const event: PaymentEvent = {
+            type: eventData.type,
+            payment: eventData.payment,
+            timestamp: typeof eventData.timestamp === 'string' 
+              ? eventData.timestamp 
+              : new Date(eventData.timestamp).toISOString()
+          };
+          handlePaymentEvent(event);
+        });
+        console.log('Payment events resumed');
+      }
+    }
+  }, [isPaused, socket, isConnected, handlePaymentEvent]);
 
   // Generate trend data
   const trendData = useMemo(() => {
@@ -137,8 +191,6 @@ const Dashboard = () => {
       const timestamp = new Date(now);
       if (trendPeriod === 'day') {
         timestamp.setHours(timestamp.getHours() - i);
-      } else if (trendPeriod === 'week') {
-        timestamp.setDate(timestamp.getDate() - i);
       } else {
         timestamp.setDate(timestamp.getDate() - i);
       }
@@ -195,6 +247,21 @@ const Dashboard = () => {
             <p className="text-slate-400">Real-time payment monitoring & insights</p>
           </div>
           <div className="flex gap-3">
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
+              isConnected ? 'bg-green-600' : 'bg-red-600'
+            }`}>
+              {isConnected ? (
+                <>
+                  <Wifi className="w-4 h-4 text-white" />
+                  <span className="text-white text-sm font-medium">Connected</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="w-4 h-4 text-white" />
+                  <span className="text-white text-sm font-medium">Disconnected</span>
+                </>
+              )}
+            </div>
             <button
               onClick={() => setIsPaused(!isPaused)}
               className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors"
@@ -205,6 +272,7 @@ const Dashboard = () => {
             <button
               onClick={exportToCSV}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              disabled={events.length === 0}
             >
               <Download className="w-4 h-4" />
               Export CSV
@@ -338,9 +406,11 @@ const Dashboard = () => {
           <div className="flex items-center gap-3">
             <Activity className="w-6 h-6 text-blue-400" />
             <h2 className="text-xl font-semibold text-white">Live Events Feed</h2>
-            <span className="px-2 py-1 bg-green-500 text-white text-xs rounded-full animate-pulse">
-              LIVE
-            </span>
+            {isConnected && !isPaused && (
+              <span className="px-2 py-1 bg-green-500 text-white text-xs rounded-full animate-pulse">
+                LIVE
+              </span>
+            )}
           </div>
           <span className="text-slate-400 text-sm">{events.length} events</span>
         </div>
@@ -348,7 +418,18 @@ const Dashboard = () => {
         <div className="space-y-2 max-h-96 overflow-y-auto">
           {events.length === 0 ? (
             <div className="text-center text-slate-400 py-12">
-              Waiting for payment events...
+              {!isConnected ? (
+                <div className="flex flex-col items-center gap-2">
+                  <WifiOff className="w-12 h-12 mb-2" />
+                  <p>Connecting to payment server...</p>
+                  <p className="text-sm">Make sure the server is running at http://localhost:3001</p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-2">
+                  <Activity className="w-12 h-12 mb-2 animate-pulse" />
+                  <p>Waiting for payment events...</p>
+                </div>
+              )}
             </div>
           ) : (
             events.map((event, idx) => (
@@ -357,6 +438,8 @@ const Dashboard = () => {
                 className={`p-4 rounded-lg border-l-4 transition-all hover:bg-slate-700 ${
                   event.payment.status === 'success'
                     ? 'bg-slate-750 border-green-500'
+                    : event.payment.status === 'refunded'
+                    ? 'bg-slate-750 border-yellow-500'
                     : 'bg-slate-750 border-red-500'
                 }`}
               >
@@ -393,6 +476,8 @@ const Dashboard = () => {
                   <span className={`px-3 py-1 rounded-full text-xs font-medium ${
                     event.payment.status === 'success'
                       ? 'bg-green-500/20 text-green-400'
+                      : event.payment.status === 'refunded'
+                      ? 'bg-yellow-500/20 text-yellow-400'
                       : 'bg-red-500/20 text-red-400'
                   }`}>
                     {event.payment.status}

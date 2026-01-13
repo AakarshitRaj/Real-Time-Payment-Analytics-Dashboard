@@ -1,5 +1,5 @@
+import { Nav } from 'react-bootstrap'
 import './globals.css'
-
 export const metadata = {
   title: 'Payment Analytics Dashboard',
   description: 'Real-time payment monitoring',
@@ -12,7 +12,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {children}
+        </body>
     </html>
   )
 }
