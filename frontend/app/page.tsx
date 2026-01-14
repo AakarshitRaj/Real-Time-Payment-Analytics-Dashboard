@@ -1,7 +1,7 @@
 'use client';
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
-import { Activity, TrendingUp, DollarSign, CheckCircle, XCircle, Clock, Download, Play, Pause, Wifi, WifiOff } from 'lucide-react';
+import { Activity, TrendingUp, DollarSign, CheckCircle, XCircle, Clock, Download, Play, Pause, Wifi, WifiOff, ChevronLeft, ChevronRight } from 'lucide-react';
 
 // Types
 interface Payment {
@@ -33,6 +33,14 @@ interface TrendData {
   amount: number;
   count: number;
   successRate: number;
+  hour?: string;
+  date?: string;
+}
+
+interface PaymentMethodData {
+  method: string;
+  count: number;
+  amount: number;
 }
 
 const Dashboard = () => {
@@ -45,14 +53,21 @@ const Dashboard = () => {
     topPaymentMethod: '',
     activePayments: 0
   });
-  const [trendPeriod, setTrendPeriod] = useState<'day' | 'week' | 'month'>('day');
+  const [trendPeriod, setTrendPeriod] = useState<'hour' | 'day' | 'week'>('hour');
   const [isPaused, setIsPaused] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [socket, setSocket] = useState<any>(null);
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const eventsPerPage = 10;
+
+  // Queue to store events when paused
+  const pausedEventsQueue = useRef<PaymentEvent[]>([]);
+  const processedEventIds = useRef<Set<string>>(new Set());
 
   // Initialize Socket.IO connection
   useEffect(() => {
-    // Load Socket.IO from CDN
     const script = document.createElement('script');
     script.src = 'https://cdn.socket.io/4.5.4/socket.io.min.js';
     script.async = true;
@@ -73,7 +88,6 @@ const Dashboard = () => {
         reconnectionAttempts: 5
       });
 
-      // Connection events
       socketInstance.on('connect', () => {
         console.log('Socket connected:', socketInstance.id);
         setIsConnected(true);
@@ -93,19 +107,19 @@ const Dashboard = () => {
         setIsConnected(false);
       });
 
-      // this is what your backend emits
+      socketInstance.removeAllListeners('payment_event');
+      
       socketInstance.on('payment_event', (eventData: any) => {
         console.log('Received payment_event:', eventData);
-        if (!isPaused) {
-          const event: PaymentEvent = {
-            type: eventData.type,
-            payment: eventData.payment,
-            timestamp: typeof eventData.timestamp === 'string' 
-              ? eventData.timestamp 
-              : new Date(eventData.timestamp).toISOString()
-          };
-          handlePaymentEvent(event);
-        }
+        const event: PaymentEvent = {
+          type: eventData.type,
+          payment: eventData.payment,
+          timestamp: typeof eventData.timestamp === 'string' 
+            ? eventData.timestamp 
+            : new Date(eventData.timestamp).toISOString()
+        };
+        
+        pausedEventsQueue.current.push(event);
       });
 
       socketInstance.on('error', (error: any) => {
@@ -119,7 +133,6 @@ const Dashboard = () => {
       console.error('Failed to load Socket.IO script');
     };
 
-    // Check if Socket.IO is already loaded
     if ((window as any).io) {
       script.onload(null as any);
     } else {
@@ -128,83 +141,230 @@ const Dashboard = () => {
 
     return () => {
       if (socket) {
+        socket.removeAllListeners();
         socket.disconnect();
       }
-      // Clean up script tag if needed
       if (script.parentNode) {
         script.parentNode.removeChild(script);
       }
     };
   }, []);
 
-  // Handle payment events
-  const handlePaymentEvent = useCallback((event: PaymentEvent) => {
-    setEvents(prev => [event, ...prev].slice(0, 100));
+  // Process queued events based on pause state
+  useEffect(() => {
+    if (!isPaused && pausedEventsQueue.current.length > 0) {
+      const queuedEvents = [...pausedEventsQueue.current];
+      pausedEventsQueue.current = [];
+      
+      queuedEvents.forEach(event => {
+        processPaymentEvent(event);
+      });
+    }
+  }, [isPaused]);
+
+  // Also process events in real-time when not paused
+  useEffect(() => {
+    if (!isPaused) {
+      const interval = setInterval(() => {
+        if (pausedEventsQueue.current.length > 0 && !isPaused) {
+          const event = pausedEventsQueue.current.shift();
+          if (event) {
+            processPaymentEvent(event);
+          }
+        }
+      }, 100);
+
+      return () => clearInterval(interval);
+    }
+  }, [isPaused]);
+
+  // Process a single payment event
+  const processPaymentEvent = useCallback((event: PaymentEvent) => {
+    const eventId = event.payment._id;
+    if (processedEventIds.current.has(eventId)) {
+      console.log('Duplicate event detected, skipping:', eventId);
+      return;
+    }
+    processedEventIds.current.add(eventId);
+    
+    if (processedEventIds.current.size > 1000) {
+      const idsArray = Array.from(processedEventIds.current);
+      processedEventIds.current = new Set(idsArray.slice(-1000));
+    }
+    
+    setEvents(prev => {
+      const newEvents = [event, ...prev].slice(0, 500);
+      return newEvents;
+    });
     
     setMetrics(prev => {
-      const newTotal = prev.totalVolume + event.payment.amount;
+      const paymentAmount = Number(event.payment.amount);
+      const newTotal = prev.totalVolume + paymentAmount;
       const newCount = prev.activePayments + 1;
       const successCount = event.payment.status === 'success' ? 1 : 0;
-      const totalSuccess = (prev.successRate * prev.activePayments + successCount) / newCount;
+      
+      const prevSuccessCount = (prev.successRate / 100) * prev.activePayments;
+      const totalSuccessCount = prevSuccessCount + successCount;
+      const newSuccessRate = newCount > 0 ? (totalSuccessCount / newCount) * 100 : 0;
       
       return {
         totalVolume: newTotal,
-        successRate: totalSuccess * 10,
+        successRate: newSuccessRate,
         averageAmount: newTotal / newCount,
-        peakHour: new Date().getHours(),
+        peakHour: prev.peakHour,
         topPaymentMethod: event.payment.method,
         activePayments: newCount
       };
     });
   }, []);
 
-  // Pause/Resume functionality
+  // Calculate peak hour from events
+  const peakHourData = useMemo(() => {
+    if (events.length === 0) return { hour: 0, count: 0 };
+
+    const hourCounts = new Map<number, number>();
+    
+    events.forEach(event => {
+      const hour = new Date(event.timestamp).getHours();
+      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+    });
+
+    let peakHour = 0;
+    let maxCount = 0;
+    
+    hourCounts.forEach((count, hour) => {
+      if (count > maxCount) {
+        maxCount = count;
+        peakHour = hour;
+      }
+    });
+
+    return { hour: peakHour, count: maxCount };
+  }, [events]);
+
+  // Update metrics with calculated peak hour
   useEffect(() => {
-    if (socket && isConnected) {
-      if (isPaused) {
-        socket.off('payment_event');
-        console.log('Payment events paused');
-      } else {
-        socket.on('payment_event', (eventData: any) => {
-          console.log('Received payment_event (via pause/resume):', eventData);
-          const event: PaymentEvent = {
-            type: eventData.type,
-            payment: eventData.payment,
-            timestamp: typeof eventData.timestamp === 'string' 
-              ? eventData.timestamp 
-              : new Date(eventData.timestamp).toISOString()
-          };
-          handlePaymentEvent(event);
+    setMetrics(prev => ({
+      ...prev,
+      peakHour: peakHourData.hour
+    }));
+  }, [peakHourData]);
+
+  // Generate REAL trend data from actual events
+  const trendData = useMemo(() => {
+    if (events.length === 0) return [];
+
+    const now = new Date();
+    const dataMap = new Map<string, TrendData>();
+    
+    if (trendPeriod === 'hour') {
+      for (let i = 23; i >= 0; i--) {
+        const time = new Date(now);
+        time.setHours(time.getHours() - i);
+        const key = time.toISOString().substring(0, 13);
+        dataMap.set(key, {
+          timestamp: time.toISOString(),
+          amount: 0,
+          count: 0,
+          successRate: 0,
+          hour: time.getHours().toString().padStart(2, '0') + ':00'
         });
-        console.log('Payment events resumed');
+      }
+    } else if (trendPeriod === 'day') {
+      for (let i = 6; i >= 0; i--) {
+        const time = new Date(now);
+        time.setDate(time.getDate() - i);
+        const key = time.toISOString().substring(0, 10);
+        dataMap.set(key, {
+          timestamp: time.toISOString(),
+          amount: 0,
+          count: 0,
+          successRate: 0,
+          date: time.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        });
+      }
+    } else {
+      for (let i = 29; i >= 0; i--) {
+        const time = new Date(now);
+        time.setDate(time.getDate() - i);
+        const key = time.toISOString().substring(0, 10);
+        dataMap.set(key, {
+          timestamp: time.toISOString(),
+          amount: 0,
+          count: 0,
+          successRate: 0,
+          date: time.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        });
       }
     }
-  }, [isPaused, socket, isConnected, handlePaymentEvent]);
 
-  // Generate trend data
-  const trendData = useMemo(() => {
-    const now = new Date();
-    const data: TrendData[] = [];
-    const points = trendPeriod === 'day' ? 24 : trendPeriod === 'week' ? 7 : 30;
-    
-    for (let i = points - 1; i >= 0; i--) {
-      const timestamp = new Date(now);
-      if (trendPeriod === 'day') {
-        timestamp.setHours(timestamp.getHours() - i);
+    events.forEach(event => {
+      const eventTime = new Date(event.timestamp);
+      let key: string;
+      
+      if (trendPeriod === 'hour') {
+        key = eventTime.toISOString().substring(0, 13);
       } else {
-        timestamp.setDate(timestamp.getDate() - i);
+        key = eventTime.toISOString().substring(0, 10);
       }
       
-      data.push({
-        timestamp: timestamp.toISOString(),
-        amount: Math.floor(Math.random() * 50000) + 10000,
-        count: Math.floor(Math.random() * 100) + 20,
-        successRate: 75 + Math.random() * 20
-      });
-    }
+      const bucket = dataMap.get(key);
+      if (bucket) {
+        bucket.amount += event.payment.amount;
+        bucket.count += 1;
+        if (event.payment.status === 'success') {
+          bucket.successRate += 1;
+        }
+      }
+    });
+
+    dataMap.forEach(bucket => {
+      if (bucket.count > 0) {
+        bucket.successRate = (bucket.successRate / bucket.count) * 100;
+      }
+    });
+
+    return Array.from(dataMap.values());
+  }, [events, trendPeriod]);
+
+  // Generate REAL payment method data from actual events
+  const paymentMethodData = useMemo(() => {
+    const methodMap = new Map<string, PaymentMethodData>();
     
-    return data;
-  }, [trendPeriod]);
+    events.forEach(event => {
+      const method = event.payment.method;
+      const existing = methodMap.get(method);
+      
+      if (existing) {
+        existing.count += 1;
+        existing.amount += event.payment.amount;
+      } else {
+        methodMap.set(method, {
+          method: method.charAt(0).toUpperCase() + method.slice(1).replace('_', ' '),
+          count: 1,
+          amount: event.payment.amount
+        });
+      }
+    });
+
+    return Array.from(methodMap.values()).sort((a, b) => b.amount - a.amount);
+  }, [events]);
+
+  // Pagination logic
+  const totalPages = Math.ceil(events.length / eventsPerPage);
+  const startIndex = (currentPage - 1) * eventsPerPage;
+  const endIndex = startIndex + eventsPerPage;
+  const currentEvents = events.slice(startIndex, endIndex);
+
+  useEffect(() => {
+    if (totalPages > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [totalPages, currentPage]);
+
+  const goToPage = (page: number) => {
+    setCurrentPage(Math.max(1, Math.min(page, totalPages)));
+  };
 
   // Export to CSV
   const exportToCSV = useCallback(() => {
@@ -228,17 +388,33 @@ const Dashboard = () => {
   }, [events]);
 
   const formatCurrency = (amount: number) => 
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+    new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp);
-    return trendPeriod === 'day' 
+    return trendPeriod === 'hour' 
       ? date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
       : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6">
+      <style jsx>{`
+        .scrollbar-thin::-webkit-scrollbar {
+          width: 8px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-track {
+          background: #1e293b;
+          border-radius: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+          background: #475569;
+          border-radius: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+          background: #64748b;
+        }
+      `}</style>
       {/* Header */}
       <div className="mb-8">
         <div className="flex items-center justify-between">
@@ -264,7 +440,9 @@ const Dashboard = () => {
             </div>
             <button
               onClick={() => setIsPaused(!isPaused)}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors"
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-white transition-colors ${
+                isPaused ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-700 hover:bg-slate-600'
+              }`}
             >
               {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
               {isPaused ? 'Resume' : 'Pause'}
@@ -298,7 +476,7 @@ const Dashboard = () => {
             <span className="text-sm font-medium opacity-80">Success Rate</span>
           </div>
           <div className="text-3xl font-bold mb-1">{metrics.successRate.toFixed(1)}%</div>
-          <div className="text-sm opacity-80">Last 100 transactions</div>
+          <div className="text-sm opacity-80">Last {metrics.activePayments} transactions</div>
         </div>
 
         <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl p-6 text-white shadow-lg">
@@ -315,8 +493,12 @@ const Dashboard = () => {
             <Clock className="w-8 h-8 opacity-80" />
             <span className="text-sm font-medium opacity-80">Peak Hour</span>
           </div>
-          <div className="text-3xl font-bold mb-1">{metrics.peakHour}:00</div>
-          <div className="text-sm opacity-80">{metrics.topPaymentMethod || 'N/A'}</div>
+          <div className="text-3xl font-bold mb-1">
+            {metrics.peakHour.toString().padStart(2, '0')}:00
+          </div>
+          <div className="text-sm opacity-80">
+            {peakHourData.count > 0 ? `${peakHourData.count} payments` : 'No data yet'}
+          </div>
         </div>
       </div>
 
@@ -327,7 +509,7 @@ const Dashboard = () => {
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-xl font-semibold text-white">Payment Trends</h2>
             <div className="flex gap-2">
-              {(['day', 'week', 'month'] as const).map(period => (
+              {(['hour', 'day', 'week'] as const).map(period => (
                 <button
                   key={period}
                   onClick={() => setTrendPeriod(period)}
@@ -337,70 +519,76 @@ const Dashboard = () => {
                       : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                   }`}
                 >
-                  {period.charAt(0).toUpperCase() + period.slice(1)}
+                  {period === 'hour' ? '24h' : period === 'day' ? '7d' : '30d'}
                 </button>
               ))}
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={trendData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis 
-                dataKey="timestamp" 
-                tickFormatter={formatTime}
-                stroke="#9CA3AF"
-                tick={{ fill: '#9CA3AF' }}
-              />
-              <YAxis stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }}
-                labelStyle={{ color: '#e2e8f0' }}
-              />
-              <Legend />
-              <Line 
-                type="monotone" 
-                dataKey="amount" 
-                stroke="#3b82f6" 
-                strokeWidth={2}
-                name="Volume ($)"
-              />
-              <Line 
-                type="monotone" 
-                dataKey="successRate" 
-                stroke="#10b981" 
-                strokeWidth={2}
-                name="Success Rate (%)"
-              />
-            </LineChart>
-          </ResponsiveContainer>
+          {trendData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <XAxis 
+                  dataKey={trendPeriod === 'hour' ? 'hour' : 'date'}
+                  stroke="#9CA3AF"
+                  tick={{ fill: '#9CA3AF' }}
+                />
+                <YAxis stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }}
+                  labelStyle={{ color: '#e2e8f0' }}
+                />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="amount" 
+                  stroke="#3b82f6" 
+                  strokeWidth={2}
+                  name="Volume (₹)"
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="successRate" 
+                  stroke="#10b981" 
+                  strokeWidth={2}
+                  name="Success Rate (%)"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[300px] flex items-center justify-center text-slate-400">
+              No data available yet
+            </div>
+          )}
         </div>
 
         {/* Payment Methods Chart */}
         <div className="bg-slate-800 rounded-xl p-6 shadow-lg">
           <h2 className="text-xl font-semibold text-white mb-6">Payment Methods</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { method: 'Card', count: 45, amount: 125000 },
-              { method: 'Bank', count: 32, amount: 98000 },
-              { method: 'Crypto', count: 18, amount: 67000 },
-              { method: 'PayPal', count: 25, amount: 54000 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis dataKey="method" stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
-              <YAxis stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }}
-                labelStyle={{ color: '#e2e8f0' }}
-              />
-              <Legend />
-              <Bar dataKey="count" fill="#8b5cf6" name="Count" />
-              <Bar dataKey="amount" fill="#06b6d4" name="Amount ($)" />
-            </BarChart>
-          </ResponsiveContainer>
+          {paymentMethodData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={paymentMethodData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <XAxis dataKey="method" stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
+                <YAxis stroke="#9CA3AF" tick={{ fill: '#9CA3AF' }} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px' }}
+                  labelStyle={{ color: '#e2e8f0' }}
+                />
+                <Legend />
+                <Bar dataKey="count" fill="#8b5cf6" name="Count" />
+                <Bar dataKey="amount" fill="#06b6d4" name="Amount (₹)" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[300px] flex items-center justify-center text-slate-400">
+              No data available yet
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Live Events Feed */}
+      {/* Live Events Feed with Pagination */}
       <div className="bg-slate-800 rounded-xl p-6 shadow-lg">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -411,11 +599,16 @@ const Dashboard = () => {
                 LIVE
               </span>
             )}
+            {isPaused && (
+              <span className="px-2 py-1 bg-orange-500 text-white text-xs rounded-full">
+                PAUSED
+              </span>
+            )}
           </div>
-          <span className="text-slate-400 text-sm">{events.length} events</span>
+          <span className="text-slate-400 text-sm">{events.length} total events</span>
         </div>
         
-        <div className="space-y-2 max-h-96 overflow-y-auto">
+        <div className="space-y-2 min-h-[400px] max-h-[600px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800">
           {events.length === 0 ? (
             <div className="text-center text-slate-400 py-12">
               {!isConnected ? (
@@ -432,59 +625,116 @@ const Dashboard = () => {
               )}
             </div>
           ) : (
-            events.map((event, idx) => (
-              <div
-                key={idx}
-                className={`p-4 rounded-lg border-l-4 transition-all hover:bg-slate-700 ${
-                  event.payment.status === 'success'
-                    ? 'bg-slate-750 border-green-500'
-                    : event.payment.status === 'refunded'
-                    ? 'bg-slate-750 border-yellow-500'
-                    : 'bg-slate-750 border-red-500'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      {event.payment.status === 'success' ? (
-                        <CheckCircle className="w-4 h-4 text-green-400" />
-                      ) : (
-                        <XCircle className="w-4 h-4 text-red-400" />
-                      )}
-                      <span className="text-white font-medium">
-                        {event.type.replace(/_/g, ' ').toUpperCase()}
-                      </span>
-                      <span className="text-slate-400 text-xs">
-                        {new Date(event.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <span className="text-slate-400">Amount:</span>
-                        <span className="text-white ml-2 font-semibold">
-                          {formatCurrency(event.payment.amount)}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Method:</span>
-                        <span className="text-white ml-2 capitalize">
-                          {event.payment.method}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+            <>
+              {currentEvents.map((event, idx) => (
+                <div
+                  key={startIndex + idx}
+                  className={`p-4 rounded-lg border-l-4 transition-all hover:bg-slate-700 ${
                     event.payment.status === 'success'
-                      ? 'bg-green-500/20 text-green-400'
+                      ? 'bg-slate-750 border-green-500'
                       : event.payment.status === 'refunded'
-                      ? 'bg-yellow-500/20 text-yellow-400'
-                      : 'bg-red-500/20 text-red-400'
-                  }`}>
-                    {event.payment.status}
-                  </span>
+                      ? 'bg-slate-750 border-yellow-500'
+                      : 'bg-slate-750 border-red-500'
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        {event.payment.status === 'success' ? (
+                          <CheckCircle className="w-4 h-4 text-green-400" />
+                        ) : (
+                          <XCircle className="w-4 h-4 text-red-400" />
+                        )}
+                        <span className="text-white font-medium">
+                          {event.type.replace(/_/g, ' ').toUpperCase()}
+                        </span>
+                        <span className="text-slate-400 text-xs">
+                          {new Date(event.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <span className="text-slate-400">Amount:</span>
+                          <span className="text-white ml-2 font-semibold">
+                            {formatCurrency(event.payment.amount)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400">Method:</span>
+                          <span className="text-white ml-2 capitalize">
+                            {event.payment.method}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                      event.payment.status === 'success'
+                        ? 'bg-green-500/20 text-green-400'
+                        : event.payment.status === 'refunded'
+                        ? 'bg-yellow-500/20 text-yellow-400'
+                        : 'bg-red-500/20 text-red-400'
+                    }`}>
+                      {event.payment.status}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))
+              ))}
+
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between pt-4 border-t border-slate-700">
+                  <div className="text-slate-400 text-sm">
+                    Showing {startIndex + 1}-{Math.min(endIndex, events.length)} of {events.length}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => goToPage(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      className="p-2 rounded-lg bg-slate-700 text-white hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <ChevronLeft className="w-5 h-5" />
+                    </button>
+                    
+                    <div className="flex items-center gap-1">
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        let pageNum;
+                        if (totalPages <= 5) {
+                          pageNum = i + 1;
+                        } else if (currentPage <= 3) {
+                          pageNum = i + 1;
+                        } else if (currentPage >= totalPages - 2) {
+                          pageNum = totalPages - 4 + i;
+                        } else {
+                          pageNum = currentPage - 2 + i;
+                        }
+                        
+                        return (
+                          <button
+                            key={pageNum}
+                            onClick={() => goToPage(pageNum)}
+                            className={`w-10 h-10 rounded-lg font-medium transition-colors ${
+                              currentPage === pageNum
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                          >
+                            {pageNum}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      onClick={() => goToPage(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      className="p-2 rounded-lg bg-slate-700 text-white hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <ChevronRight className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

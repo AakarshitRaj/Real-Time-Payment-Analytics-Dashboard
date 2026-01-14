@@ -7,12 +7,12 @@ import { PaymentsGateway } from './payments.gateway';
 @Injectable()
 export class PaymentsService {
   private logger = new Logger('PaymentsService');
+  private currentMethodIndex = 0;
 
   constructor(
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     private paymentsGateway: PaymentsGateway,
   ) {
-    // Simulate real-time payment events
     this.startPaymentSimulation();
   }
 
@@ -24,12 +24,18 @@ export class PaymentsService {
 
   private async simulatePayment() {
     const methods = ['card', 'bank_transfer', 'crypto', 'paypal'];
-    const statuses = ['success', 'success', 'success', 'success', 'failed']; // 80% success rate
+    const statuses = ['success', 'success', 'success', 'success', 'failed'];
+
+    const method = methods[this.currentMethodIndex];
+    this.currentMethodIndex = (this.currentMethodIndex + 1) % methods.length;
+
+    // ✅ CORRECT: Generates 100 to 500
+    const amount = Math.floor(Math.random() * 401) + 100;
 
     const payment = new this.paymentModel({
       tenantId: 'tenant_1',
-      amount: Math.floor(Math.random() * 5000) + 100,
-      method: methods[Math.floor(Math.random() * methods.length)],
+      amount: amount,
+      method: method,
       status: statuses[Math.floor(Math.random() * statuses.length)],
     });
 
@@ -44,7 +50,7 @@ export class PaymentsService {
       timestamp: new Date(),
     });
 
-    this.logger.debug(`Simulated payment: ${payment._id} (${payment.status})`);
+    this.logger.debug(`Simulated payment: ${payment._id} (${payment.status}) - ${method} - ₹${amount}`);
   }
 
   async findAll(tenantId: string, limit = 100) {
@@ -53,6 +59,44 @@ export class PaymentsService {
       .sort({ createdAt: -1 })
       .limit(limit)
       .exec();
+  }
+
+  // ✅ ADD THIS METHOD to clear and reseed
+  async clearAndReseed() {
+    // Delete all existing payments
+    await this.paymentModel.deleteMany({});
+    this.logger.log('Cleared all existing payments');
+
+    const methods = ['card', 'bank_transfer', 'crypto', 'paypal'];
+    const statuses = ['success', 'success', 'success', 'failed'];
+    const payments = [];
+
+    for (let i = 0; i < 1000; i++) {
+      const daysAgo = Math.floor(Math.random() * 30);
+      const hoursAgo = Math.floor(Math.random() * 24);
+      
+      const createdAt = new Date();
+      createdAt.setDate(createdAt.getDate() - daysAgo);
+      createdAt.setHours(createdAt.getHours() - hoursAgo);
+
+      payments.push({
+        tenantId: 'tenant_1',
+        amount: Math.floor(Math.random() * 401) + 100, // ✅ 100 to 500
+        method: methods[Math.floor(Math.random() * methods.length)],
+        status: statuses[Math.floor(Math.random() * statuses.length)],
+        createdAt,
+        updatedAt: createdAt,
+      });
+    }
+
+    await this.paymentModel.insertMany(payments);
+    this.logger.log(`Reseeded ${payments.length} payments with amounts 100-500`);
+    
+    return { 
+      message: 'Cleared and reseeded successfully', 
+      count: payments.length,
+      amountRange: '100-500 INR'
+    };
   }
 
   async seedData() {
@@ -66,7 +110,6 @@ export class PaymentsService {
     const statuses = ['success', 'success', 'success', 'failed'];
     const payments = [];
 
-    // Generate 1000 historical payments
     for (let i = 0; i < 1000; i++) {
       const daysAgo = Math.floor(Math.random() * 30);
       const hoursAgo = Math.floor(Math.random() * 24);
@@ -77,7 +120,7 @@ export class PaymentsService {
 
       payments.push({
         tenantId: 'tenant_1',
-        amount: Math.floor(Math.random() * 5000) + 100,
+        amount: Math.floor(Math.random() * 401) + 100, // ✅ 100 to 500
         method: methods[Math.floor(Math.random() * methods.length)],
         status: statuses[Math.floor(Math.random() * statuses.length)],
         createdAt,
@@ -88,9 +131,10 @@ export class PaymentsService {
     await this.paymentModel.insertMany(payments);
     this.logger.log(`Seeded ${payments.length} payments`);
     
-    return { message: 'Seeded successfully', count: payments.length };
+    return { 
+      message: 'Seeded successfully', 
+      count: payments.length,
+      amountRange: '100-500 INR'
+    };
   }
 }
-
-
-
